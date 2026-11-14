@@ -12,9 +12,9 @@ Java 25, a LTS vigente, e Spring Boot 4.1.2, a versão estável mais recente (a 
 candidate). Com o Boot 4 vêm Spring Framework 7, Jackson 3, Spring Kafka 4 e Spring Data MongoDB 5. Os
 testes usam Testcontainers 2, WireMock 3 e ArchUnit.
 
-Do Java moderno, o código usa records no domínio e nos DTOs, e `sealed interface` com `switch` exaustivo
-na autorização, nos eventos e no mapeamento de erro para HTTP. Um erro de negócio novo sem tela definida não
-compila.
+Do Java moderno, o código usa records no domínio e nos DTOs, `sealed interface` com `switch` exaustivo na
+autorização e nos eventos, e `switch` exaustivo sobre o enum `CheckoutError` no mapeamento de erro para HTTP.
+Um erro de negócio novo sem tela definida não compila.
 
 ## Alternativas consideradas
 
