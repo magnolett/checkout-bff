@@ -42,9 +42,17 @@ class ProductsServiceClientTest {
     private CircuitBreaker circuitBreaker;
     private ProductsServiceClient client;
 
+    /**
+     * Warms Reactor Netty up once (event loops, connection pool, name resolution). On a cold JVM the first request
+     * can spend the whole 500 ms client timeout before it even reaches the server: on a 2-core CI runner the slow
+     * answer test saw 2 requests instead of 3.
+     */
     @BeforeAll
     static void start() {
         server.start();
+        WebClient.create(server.baseUrl()).get().uri("/__admin/mappings")
+                .retrieve().toBodilessEntity()
+                .block(Duration.ofSeconds(30));
     }
 
     @AfterAll
