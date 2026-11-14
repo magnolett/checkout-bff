@@ -1,0 +1,114 @@
+spring:
+  application:
+    name: checkout-bff
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/checkout}
+  data:
+    mongodb:
+      representation:
+        big-decimal: decimal128
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 250ms
+      connect-timeout: 300ms
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    consumer:
+      auto-offset-reset: earliest
+
+server:
+  port: 8080
+  shutdown: graceful
+
+# Checkout rules. The lease must be longer than the payment timeout (checked at startup).
+checkout:
+  cart-ttl: 30m
+  payment-timeout: 10s
+  processing-lease: 30s
+
+integration:
+  products-service:
+    base-url: ${PRODUCTS_SERVICE_URL:http://localhost:8081}
+    timeout: 1s
+    cache-ttl: 10m
+  payment-methods-service:
+    base-url: ${PAYMENT_METHODS_SERVICE_URL:http://localhost:8082}
+    timeout: 1s
+    cache-ttl: 5m
+  payment-gateway:
+    # fictional ISPB, used only to build the simulated Pix end-to-end id
+    pix-ispb: "99999999"
+    latency: ${PAYMENT_GATEWAY_LATENCY:0ms}
+  persistence:
+    abandoned-cart-retention: 24h
+
+messaging:
+  payment-events-topic: checkout.payment-events
+  partitions: 3
+  outbox:
+    enabled: true
+    relay-interval: 1s
+    batch-size: 50
+    claim-duration: 30s
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-failure-predicate: io.github.magnolett.checkoutbff.integration.http.TransientFailure
+    instances:
+      products-service:
+        base-config: default
+      payment-methods-service:
+        base-config: default
+  retry:
+    configs:
+      default:
+        max-attempts: 3
+        wait-duration: 100ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exception-predicate: io.github.magnolett.checkoutbff.integration.http.TransientFailure
+    instances:
+      products-service:
+        base-config: default
+      payment-methods-service:
+        base-config: default
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+      group:
+        # Mongo is required to serve; Redis is not, so a cache outage does not take the instance out of rotation
+        readiness:
+          include: readinessState,mongo
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    io.github.magnolett: INFO

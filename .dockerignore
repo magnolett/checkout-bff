@@ -1,0 +1,16 @@
+# Only the wrapper, the pom and src/main are needed to build the image
+target/
+src/test/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+mocks/
+docs/
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
+.env
+.env.*

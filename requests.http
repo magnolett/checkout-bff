@@ -1,0 +1,144 @@
+# Cenários do README para o cliente HTTP do IntelliJ.
+# Suba a stack antes: docker compose up -d --build --wait
+# Cada bloco começa com um pré-checkout, que guarda o cartId para os pedidos seguintes.
+
+@host = http://localhost:8080
+
+### Pré-checkout de um plano
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "premium"}]}
+
+> {% client.global.set("cartId", response.body.cartId); %}
+
+### Pagamento recusado: cartão terminado em 0002 (422 PAYMENT_DECLINED)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Crédito",
+    "card": {"holderName": "Ana Souza", "number": "4000000000000002", "expiry": "12/30", "cvv": "123"}
+  }
+}
+
+### Nova tentativa no mesmo carrinho, com o cartão do enunciado (200 APROVADO)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Crédito",
+    "card": {"holderName": "Ana Souza", "number": "4111111111114242", "expiry": "12/28", "cvv": "123"}
+  }
+}
+
+### Pagar de novo o carrinho aprovado (409 CART_ALREADY_PAID)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{"cartId": "{{cartId}}", "paymentMethod": {"name": "Pix"}}
+
+### Pré-checkout com dois planos, para o Pix
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "basico"}, {"slug": "familia"}]}
+
+> {% client.global.set("cartId", response.body.cartId); %}
+
+### Pix (200, com pixCode no formato do endToEndId)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{"cartId": "{{cartId}}", "paymentMethod": {"name": "Pix"}}
+
+### Pré-checkout para o teste de idempotência
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "familia"}]}
+
+> {% client.global.set("cartId", response.body.cartId); %}
+
+### Idempotency-Key: rode este pedido duas vezes e compare as respostas (mesmo paidAt)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+Idempotency-Key: pedido-{{cartId}}
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Débito",
+    "card": {"holderName": "Ana Souza", "number": "4242424242424242", "expiry": "12/30", "cvv": "123"}
+  }
+}
+
+### Mesma chave com outro cartão (422 IDEMPOTENCY_KEY_REUSED)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+Idempotency-Key: pedido-{{cartId}}
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Débito",
+    "card": {"holderName": "Ana Souza", "number": "5555555555554444", "expiry": "12/30", "cvv": "123"}
+  }
+}
+
+### Produto inexistente (422 PRODUCT_NOT_FOUND, cartId null)
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "inexistente"}]}
+
+### Carrinho inexistente (404 CART_NOT_FOUND)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{"cartId": "00000000-0000-0000-0000-000000000000", "paymentMethod": {"name": "Pix"}}
+
+### Pré-checkout para os erros de dado de pagamento
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "basico"}]}
+
+> {% client.global.set("cartId", response.body.cartId); %}
+
+### Meio fora do carrinho: Boleto vem desabilitado do serviço de meios (422 PAYMENT_METHOD_NOT_ALLOWED)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{"cartId": "{{cartId}}", "paymentMethod": {"name": "Boleto"}}
+
+### Cartão vencido (400 INVALID_PAYMENT_DATA)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Crédito",
+    "card": {"holderName": "Ana Souza", "number": "4242424242424242", "expiry": "01/20", "cvv": "123"}
+  }
+}
+
+### Cartão enviado no Pix (400 INVALID_PAYMENT_DATA)
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Pix",
+    "card": {"holderName": "Ana Souza", "number": "4242424242424242", "expiry": "12/30", "cvv": "123"}
+  }
+}
+
+### Readiness
+GET {{host}}/actuator/health/readiness

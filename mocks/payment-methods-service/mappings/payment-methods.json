@@ -1,0 +1,20 @@
+{
+  "mappings": [
+    {
+      "request": { "method": "GET", "urlPath": "/payment-methods" },
+      "response": {
+        "status": 200,
+        "fixedDelayMilliseconds": 120,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": {
+          "paymentMethods": [
+            { "code": "CREDIT_CARD", "displayName": "Cartão de Crédito", "enabled": true, "provider": "simulated-acquirer" },
+            { "code": "DEBIT_CARD", "displayName": "Cartão de Débito", "enabled": true, "provider": "simulated-acquirer" },
+            { "code": "PIX", "displayName": "Pix", "enabled": true, "provider": "simulated-psp" },
+            { "code": "BOLETO", "displayName": "Boleto", "enabled": false, "provider": "simulated-bank" }
+          ]
+        }
+      }
+    }
+  ]
+}

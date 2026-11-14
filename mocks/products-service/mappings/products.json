@@ -1,0 +1,64 @@
+{
+  "mappings": [
+    {
+      "priority": 1,
+      "request": { "method": "GET", "urlPath": "/products/basico" },
+      "response": {
+        "status": 200,
+        "fixedDelayMilliseconds": 120,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": {
+          "id": "prod-0001",
+          "slug": "basico",
+          "title": "Plano Básico",
+          "summary": "Assinatura mensal com o catálogo essencial",
+          "pricing": { "amount": 19.90, "currency": "BRL", "billingPeriod": "MONTHLY" },
+          "metadata": { "sku": "SUB-BASICO-M", "catalogVersion": "2026-11" }
+        }
+      }
+    },
+    {
+      "priority": 1,
+      "request": { "method": "GET", "urlPath": "/products/premium" },
+      "response": {
+        "status": 200,
+        "fixedDelayMilliseconds": 120,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": {
+          "id": "prod-0002",
+          "slug": "premium",
+          "title": "Plano Premium",
+          "summary": "Assinatura mensal com catálogo completo",
+          "pricing": { "amount": 39.90, "currency": "BRL", "billingPeriod": "MONTHLY" },
+          "metadata": { "sku": "SUB-PREMIUM-M", "catalogVersion": "2026-11" }
+        }
+      }
+    },
+    {
+      "priority": 1,
+      "request": { "method": "GET", "urlPath": "/products/familia" },
+      "response": {
+        "status": 200,
+        "fixedDelayMilliseconds": 120,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": {
+          "id": "prod-0003",
+          "slug": "familia",
+          "title": "Plano Família",
+          "summary": "Assinatura mensal com catálogo completo e perfis para toda a família",
+          "pricing": { "amount": 59.90, "currency": "BRL", "billingPeriod": "MONTHLY" },
+          "metadata": { "sku": "SUB-FAMILIA-M", "catalogVersion": "2026-11" }
+        }
+      }
+    },
+    {
+      "priority": 10,
+      "request": { "method": "GET", "urlPathPattern": "/products/.+" },
+      "response": {
+        "status": 404,
+        "headers": { "Content-Type": "application/json" },
+        "jsonBody": { "error": "product_not_found" }
+      }
+    }
+  ]
+}
