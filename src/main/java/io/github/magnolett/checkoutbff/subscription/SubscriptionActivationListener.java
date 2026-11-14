@@ -16,6 +16,7 @@ import tools.jackson.databind.json.JsonMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 /**
@@ -57,7 +58,7 @@ class SubscriptionActivationListener {
                 .setOnInsert("currency", event.currency())
                 .setOnInsert("transactionId", event.transactionId())
                 .setOnInsert("sourceEventId", event.eventId())
-                .setOnInsert("activatedAt", clock.instant());
+                .setOnInsert("activatedAt", clock.instant().truncatedTo(ChronoUnit.SECONDS));
         UpdateResult result = mongo.upsert(Query.query(Criteria.where("_id").is(event.cartId())), activation,
                         COLLECTION)
                 .block(WRITE_TIMEOUT);
