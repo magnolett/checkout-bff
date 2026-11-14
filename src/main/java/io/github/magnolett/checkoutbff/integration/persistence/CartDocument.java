@@ -43,7 +43,7 @@ record CartDocument(
     record PaymentMethodDocument(PaymentMethodType type, String name) {
     }
 
-    record AttemptDocument(String id, String idempotencyKey, String fingerprint, PaymentMethodType methodType,
+    record AttemptDocument(String id, List<String> idempotencyKeys, String fingerprint, PaymentMethodType methodType,
                            String methodName, String lastDigits, BigDecimal amount, String currency,
                            AttemptStatus status, String transactionId, String declineReason, Instant startedAt,
                            Instant completedAt) {

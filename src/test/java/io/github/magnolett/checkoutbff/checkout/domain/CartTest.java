@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import static io.github.magnolett.checkoutbff.checkout.CheckoutFixtures.*;
@@ -58,11 +59,14 @@ class CartTest {
         }
 
         @Test
-        void refusesProductsInDifferentCurrencies() {
+        void productsInDifferentCurrenciesAreNotCombinableAndNoCartExistsYet() {
             Product dollars = new Product("usd", "USD plan", null, Money.of("5.00", "USD"));
 
             assertThatThrownBy(() -> Cart.create(UUID.randomUUID(), List.of(premium(), dollars), allMethods(), NOW, TTL))
-                    .isInstanceOf(IllegalArgumentException.class);
+                    .isInstanceOfSatisfying(CheckoutException.class, e -> {
+                        assertThat(e.error()).isEqualTo(CheckoutError.PRODUCTS_NOT_COMBINABLE);
+                        assertThat(e.cartId()).isNull();
+                    });
         }
     }
 
@@ -85,7 +89,7 @@ class CartTest {
             PaymentAttempt attempt = only(cart);
             assertThat(attempt.id()).isEqualTo(pending.attemptId());
             assertThat(attempt.status()).isEqualTo(AttemptStatus.PENDING);
-            assertThat(attempt.idempotencyKey()).isEqualTo("key-1");
+            assertThat(attempt.idempotencyKeys()).containsExactly("key-1");
             assertThat(attempt.fingerprint()).isEqualTo(creditOrder().fingerprint());
             assertThat(attempt.methodName()).isEqualTo(CREDIT);
             assertThat(attempt.methodType()).isEqualTo(PaymentMethodType.CREDIT_CARD);
@@ -322,10 +326,23 @@ class CartTest {
         }
 
         @Test
-        void aDifferentFingerprintAbandonsTheStaleAttemptAndOpensANewOne() {
+        void aDifferentInstrumentNeverSilentlyReplacesAnAttemptWithUnknownOutcome() {
+            Cart cart = openCart();
+            UUID unsettled = cart.startPayment(creditOrder(), NOW, LEASE).attemptId();
+            Instant afterLease = NOW.plus(LEASE).plusSeconds(1);
+
+            assertThatThrownBy(() -> cart.startPayment(pixOrder(), afterLease, LEASE))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(unsettled.toString());
+            assertThat(only(cart).status()).isEqualTo(AttemptStatus.PENDING);
+        }
+
+        @Test
+        void aDifferentInstrumentOpensANewAttemptOnceTheProviderNeverReceivedTheOldOne() {
             Cart cart = openCart();
             UUID stale = cart.startPayment(creditOrder(), NOW, LEASE).attemptId();
             Instant afterLease = NOW.plus(LEASE).plusSeconds(1);
+            cart.settle(stale, Optional.empty(), afterLease);
 
             PendingPayment fresh = cart.startPayment(pixOrder(), afterLease, LEASE);
 
@@ -342,9 +359,35 @@ class CartTest {
         void anAbandonedAttemptCanNoLongerBeApproved() {
             Cart cart = openCart();
             UUID stale = cart.startPayment(creditOrder(), NOW, LEASE).attemptId();
-            cart.startPayment(pixOrder(), NOW.plus(LEASE).plusSeconds(1), LEASE);
+            cart.settle(stale, Optional.empty(), NOW.plus(LEASE).plusSeconds(1));
 
             assertThatThrownBy(() -> cart.approve(stale, "AUTH-1", LATER)).isInstanceOf(IllegalStateException.class);
+        }
+
+        @Test
+        void resumingWithANewIdempotencyKeyMakesThatKeyFindTheAttemptToo() {
+            Cart cart = openCart();
+            UUID first = cart.startPayment(creditOrder("key-1"), NOW, LEASE).attemptId();
+            Instant afterLease = NOW.plus(LEASE).plusSeconds(1);
+
+            cart.startPayment(creditOrder("key-2"), afterLease, LEASE);
+
+            assertThat(only(cart).idempotencyKeys()).containsExactly("key-1", "key-2");
+            assertThat(cart.attemptByIdempotencyKey("key-1")).map(PaymentAttempt::id).contains(first);
+            assertThat(cart.attemptByIdempotencyKey("key-2")).map(PaymentAttempt::id).contains(first);
+        }
+
+        @Test
+        void resumingWithTheSameKeyOrWithoutAKeyKeepsTheKeysAsTheyWere() {
+            Cart cart = openCart();
+            UUID first = cart.startPayment(creditOrder("key-1"), NOW, LEASE).attemptId();
+            cart.releaseLease(first, LATER);
+            cart.startPayment(creditOrder("key-1"), LATER, LEASE);
+            cart.releaseLease(first, LATER.plusSeconds(1));
+
+            cart.startPayment(creditOrder(), LATER.plusSeconds(1), LEASE);
+
+            assertThat(only(cart).idempotencyKeys()).containsExactly("key-1");
         }
 
         @Test
@@ -485,6 +528,106 @@ class CartTest {
 
             assertThat(cart.status()).isEqualTo(CartStatus.PAID);
             assertThat(cart.approvedAttempt().orElseThrow().methodType()).isEqualTo(PaymentMethodType.PIX);
+        }
+    }
+
+    @Nested
+    class SettlingALostAnswer {
+
+        private final Instant afterLease = NOW.plus(LEASE).plusSeconds(1);
+
+        private Cart cartWithLostAnswer() {
+            Cart cart = openCart();
+            cart.startPayment(creditOrder(), NOW, LEASE);
+            return cart;
+        }
+
+        @Test
+        void aDifferentInstrumentAfterTheLeaseNeedsThePendingAttemptSettled() {
+            Cart cart = cartWithLostAnswer();
+
+            assertThat(cart.attemptToSettleBefore(pixOrder(), afterLease)).map(PaymentAttempt::id)
+                    .contains(only(cart).id());
+        }
+
+        @Test
+        void theSameInstrumentResumesInsteadAndNeedsNoSettlement() {
+            Cart cart = cartWithLostAnswer();
+
+            assertThat(cart.attemptToSettleBefore(creditOrder(), afterLease)).isEmpty();
+        }
+
+        @Test
+        void nothingToSettleWhileTheLeaseIsActiveOnAPaidCartOrWithoutAPendingAttempt() {
+            Cart busy = cartWithLostAnswer();
+            assertThat(busy.attemptToSettleBefore(pixOrder(), LATER)).isEmpty();
+
+            Cart paid = cartWithLostAnswer();
+            paid.approve(only(paid).id(), "AUTH-1", LATER);
+            assertThat(paid.attemptToSettleBefore(pixOrder(), afterLease)).isEmpty();
+
+            assertThat(openCart().attemptToSettleBefore(pixOrder(), NOW)).isEmpty();
+        }
+
+        @Test
+        void approvedByTheProviderMakesTheCartPaidByThatAttemptAndRaisesTheApprovalEvent() {
+            Cart cart = cartWithLostAnswer();
+            UUID attemptId = only(cart).id();
+
+            cart.settle(attemptId, Optional.of(new PaymentAuthorization.Approved("AUTH-LATE")), afterLease);
+
+            assertThat(cart.status()).isEqualTo(CartStatus.PAID);
+            assertThat(cart.paidAt()).isEqualTo(afterLease);
+            assertThat(only(cart).status()).isEqualTo(AttemptStatus.APPROVED);
+            assertThat(only(cart).transactionId()).isEqualTo("AUTH-LATE");
+            assertThat(cart.newEvents()).singleElement().isInstanceOfSatisfying(PaymentApproved.class,
+                    event -> assertThat(event.transactionId()).isEqualTo("AUTH-LATE"));
+            assertFails(cart, pixOrder(), afterLease, CheckoutError.CART_ALREADY_PAID);
+        }
+
+        @Test
+        void declinedByTheProviderIsRecordedAndTheCartTakesAnotherInstrument() {
+            Cart cart = cartWithLostAnswer();
+            UUID attemptId = only(cart).id();
+
+            cart.settle(attemptId, Optional.of(new PaymentAuthorization.Declined("insufficient funds")), afterLease);
+
+            assertThat(cart.status()).isEqualTo(CartStatus.DECLINED);
+            assertThat(only(cart).status()).isEqualTo(AttemptStatus.DECLINED);
+            assertThat(cart.newEvents()).singleElement().isInstanceOf(PaymentDeclined.class);
+            PendingPayment fresh = cart.startPayment(pixOrder(), afterLease, LEASE);
+            assertThat(fresh.attemptId()).isNotEqualTo(attemptId);
+        }
+
+        @Test
+        void neverReceivedByTheProviderIsAbandonedWithoutAnyEvent() {
+            Cart cart = cartWithLostAnswer();
+
+            cart.settle(only(cart).id(), Optional.empty(), afterLease);
+
+            assertThat(only(cart).status()).isEqualTo(AttemptStatus.ABANDONED);
+            assertThat(cart.status()).isEqualTo(CartStatus.OPEN);
+            assertThat(cart.processingLeaseUntil()).isNull();
+            assertThat(cart.newEvents()).isEmpty();
+        }
+
+        @Test
+        void anAttemptInsideItsLeaseCannotBeSettled() {
+            Cart cart = cartWithLostAnswer();
+
+            assertThatThrownBy(() -> cart.settle(only(cart).id(), Optional.empty(), LATER))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(only(cart).status()).isEqualTo(AttemptStatus.PENDING);
+        }
+
+        @Test
+        void anApprovalFoundAfterExpiryStillPaysTheCartBecauseTheChargeStartedInTime() {
+            Cart cart = cartWithLostAnswer();
+            Instant afterExpiry = cart.expiresAt().plusSeconds(60);
+
+            cart.settle(only(cart).id(), Optional.of(new PaymentAuthorization.Approved("AUTH-1")), afterExpiry);
+
+            assertThat(cart.status()).isEqualTo(CartStatus.PAID);
         }
     }
 

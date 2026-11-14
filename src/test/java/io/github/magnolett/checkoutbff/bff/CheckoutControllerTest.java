@@ -400,7 +400,9 @@ class CheckoutControllerTest {
     @ParameterizedTest
     @EnumSource(CheckoutError.class)
     void everyBusinessErrorAnswers4xxWithTheErrorObjectAndTheCartId(CheckoutError error) {
-        UUID errorCartId = error == CheckoutError.PRODUCT_NOT_FOUND ? null : cartId;
+        boolean preCheckoutError = error == CheckoutError.PRODUCT_NOT_FOUND
+                || error == CheckoutError.PRODUCTS_NOT_COMBINABLE;
+        UUID errorCartId = preCheckoutError ? null : cartId;
         when(checkoutService.pay(any())).thenReturn(Mono.error(new CheckoutException(error, errorCartId, "detail")));
 
         WebTestClient.ResponseSpec spec = post("/operations/checkout", cardCheckoutBody());

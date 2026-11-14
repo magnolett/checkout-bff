@@ -18,6 +18,7 @@ import io.github.magnolett.checkoutbff.checkout.port.ServiceUnavailableException
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DataAccessResourceFailureException;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -28,6 +29,7 @@ import static io.github.magnolett.checkoutbff.checkout.CheckoutFixtures.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -105,6 +107,16 @@ class CheckoutServiceTest {
         return pending.attemptId();
     }
 
+    /** First attempt sent to a gateway that never answers: outcome unknown, attempt pending, lease released. */
+    private UUID timeOutFirstAttempt(PayCommand command) {
+        when(gateway.authorize(any())).thenReturn(Mono.never());
+        StepVerifier.withVirtualTime(() -> service.pay(command))
+                .thenAwait(PAYMENT_TIMEOUT.plusSeconds(1))
+                .expectError(ServiceUnavailableException.class)
+                .verify(Duration.ofSeconds(5));
+        return stored().attempts().get(0).id();
+    }
+
     // ---- cart lookup
 
     @Test
@@ -145,7 +157,7 @@ class CheckoutServiceTest {
         assertThat(saved.attempts()).singleElement().satisfies(attempt -> {
             assertThat(attempt.status()).isEqualTo(AttemptStatus.APPROVED);
             assertThat(attempt.transactionId()).isEqualTo("AUTH-1");
-            assertThat(attempt.idempotencyKey()).isEqualTo("key-1");
+            assertThat(attempt.idempotencyKeys()).containsExactly("key-1");
         });
         assertThat(carts.persistedEvents()).singleElement().isInstanceOf(CheckoutEvent.PaymentApproved.class);
     }
@@ -496,13 +508,9 @@ class CheckoutServiceTest {
     }
 
     @Test
-    void aRetryWithAnotherInstrumentAfterATimeoutAbandonsTheUnknownAttempt() {
-        when(gateway.authorize(any())).thenReturn(Mono.never());
-        StepVerifier.withVirtualTime(() -> service.pay(credit(null)))
-                .thenAwait(PAYMENT_TIMEOUT.plusSeconds(1))
-                .expectError(ServiceUnavailableException.class)
-                .verify(Duration.ofSeconds(5));
-        UUID firstAttempt = stored().attempts().get(0).id();
+    void anotherInstrumentAfterATimeoutAbandonsTheFirstAttemptWhenTheProviderNeverReceivedIt() {
+        UUID firstAttempt = timeOutFirstAttempt(credit(null));
+        when(gateway.outcomeOf(firstAttempt)).thenReturn(Mono.empty());
         gatewayApproves("E999");
 
         pay(command(PIX, null, null));
@@ -511,6 +519,176 @@ class CheckoutServiceTest {
         assertThat(stored().attempts().get(0).id()).isEqualTo(firstAttempt);
         assertThat(stored().attempts().get(0).status()).isEqualTo(AttemptStatus.ABANDONED);
         assertThat(stored().attempts().get(1).status()).isEqualTo(AttemptStatus.APPROVED);
+        assertThat(lastGatewayCall().attemptId()).isNotEqualTo(firstAttempt);
+    }
+
+    // ---- lost answer, then a different instrument
+
+    @Test
+    void anotherInstrumentAfterATimeoutFindsTheFirstChargeApprovedAndChargesNothingElse() {
+        UUID firstAttempt = timeOutFirstAttempt(credit(null));
+        when(gateway.outcomeOf(firstAttempt)).thenReturn(approved("AUTH-LATE"));
+
+        assertFailsWith(command(PIX, null, null), CheckoutError.CART_ALREADY_PAID);
+
+        Cart saved = stored();
+        assertThat(saved.status()).isEqualTo(CartStatus.PAID);
+        assertThat(saved.attempts()).singleElement().satisfies(attempt -> {
+            assertThat(attempt.id()).isEqualTo(firstAttempt);
+            assertThat(attempt.status()).isEqualTo(AttemptStatus.APPROVED);
+            assertThat(attempt.transactionId()).isEqualTo("AUTH-LATE");
+        });
+        assertThat(carts.persistedEvents()).singleElement().isInstanceOf(CheckoutEvent.PaymentApproved.class);
+        verify(gateway, times(1)).authorize(any());
+    }
+
+    @Test
+    void anotherInstrumentAfterATimeoutIsChargedWhenTheProviderDeclinedTheFirstAttempt() {
+        UUID firstAttempt = timeOutFirstAttempt(credit(null));
+        when(gateway.outcomeOf(firstAttempt)).thenReturn(declined("insufficient funds"));
+        gatewayApproves("E999");
+
+        PaymentReceipt receipt = pay(command(PIX, null, null));
+
+        assertThat(receipt.methodType()).isEqualTo(PaymentMethodType.PIX);
+        assertThat(stored().attempts()).extracting(PaymentAttempt::status)
+                .containsExactly(AttemptStatus.DECLINED, AttemptStatus.APPROVED);
+        assertThat(lastGatewayCall().attemptId()).isNotEqualTo(firstAttempt);
+    }
+
+    @Test
+    void aStatusQueryWithoutAnswerIsServiceUnavailableAndNothingIsReplaced() {
+        UUID firstAttempt = timeOutFirstAttempt(credit(null));
+        when(gateway.outcomeOf(firstAttempt)).thenReturn(Mono.never());
+
+        StepVerifier.withVirtualTime(() -> service.pay(command(PIX, null, null)))
+                .thenAwait(PAYMENT_TIMEOUT.plusSeconds(1))
+                .expectError(ServiceUnavailableException.class)
+                .verify(Duration.ofSeconds(5));
+
+        assertThat(stored().attempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.status()).isEqualTo(AttemptStatus.PENDING));
+        verify(gateway, times(1)).authorize(any());
+    }
+
+    @Test
+    void aFailingStatusQueryIsServiceUnavailableAndNothingIsReplaced() {
+        UUID firstAttempt = timeOutFirstAttempt(credit(null));
+        when(gateway.outcomeOf(firstAttempt)).thenReturn(Mono.error(new IllegalStateException("connection reset")));
+
+        StepVerifier.create(service.pay(command(PIX, null, null)))
+                .expectError(ServiceUnavailableException.class)
+                .verify(Duration.ofSeconds(5));
+
+        assertThat(stored().attempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.status()).isEqualTo(AttemptStatus.PENDING));
+    }
+
+    @Test
+    void theSameInstrumentResumesWithoutAskingTheProviderForTheStatus() {
+        timeOutFirstAttempt(credit(null));
+        gatewayApproves("AUTH-1");
+
+        pay(credit(null));
+
+        verify(gateway, never()).outcomeOf(any());
+    }
+
+    // ---- a new key that resumes an attempt
+
+    @Test
+    void aNewKeyThatResumedTheAttemptReplaysItsReceiptAndSoDoesTheFirstKey() {
+        timeOutFirstAttempt(credit("key-1"));
+        gatewayApproves("AUTH-1");
+        PaymentReceipt approved = pay(credit("key-2"));
+
+        PaymentReceipt replayedSecondKey = pay(credit("key-2"));
+        PaymentReceipt replayedFirstKey = pay(credit("key-1"));
+
+        assertThat(replayedSecondKey).isEqualTo(approved);
+        assertThat(replayedFirstKey).isEqualTo(approved);
+        verify(gateway, times(2)).authorize(any());
+    }
+
+    // ---- the provider answered, but saving the answer failed
+
+    @Test
+    void anApprovalWhoseSaveLostTheRaceToARequestThatFinishedTheSameAttemptReturnsTheReceipt() {
+        when(gateway.authorize(any())).thenAnswer(invocation -> {
+            PendingPayment pending = invocation.getArgument(0);
+            Cart other = carts.stored(cart.id());
+            other.approve(pending.attemptId(), "AUTH-1", NOW);
+            carts.update(other).block();
+            return approved("AUTH-1");
+        });
+
+        PaymentReceipt receipt = pay(credit(null));
+
+        assertThat(receipt.lastDigits()).isEqualTo("4242");
+        assertThat(stored().status()).isEqualTo(CartStatus.PAID);
+        assertThat(carts.persistedEvents()).hasSize(1);
+    }
+
+    @Test
+    void anApprovalWhoseSaveLostTheRaceToARequestStillRunningIsPaymentInProgress() {
+        when(gateway.authorize(any())).thenAnswer(invocation -> {
+            Cart other = carts.stored(cart.id());
+            other.startPayment(credit(null).order(), NOW.plus(LEASE).plusSeconds(1), LEASE);
+            carts.update(other).block();
+            return approved("AUTH-1");
+        });
+
+        assertFailsWith(credit(null), CheckoutError.PAYMENT_IN_PROGRESS);
+
+        assertThat(stored().attempts()).singleElement()
+                .satisfies(attempt -> assertThat(attempt.status()).isEqualTo(AttemptStatus.PENDING));
+    }
+
+    @Test
+    void anApprovalNotSavedBecauseStorageFailedReleasesTheLeaseSoTheRetryResumesAtOnce() {
+        gatewayApproves("AUTH-1");
+        DataAccessResourceFailureException mongoDown = new DataAccessResourceFailureException("mongo down");
+        carts.failUpdate(2, mongoDown);
+
+        StepVerifier.create(service.pay(credit(null)))
+                .expectErrorSatisfies(error -> assertThat(error).isSameAs(mongoDown))
+                .verify(Duration.ofSeconds(5));
+
+        Cart saved = stored();
+        UUID attemptId = saved.attempts().get(0).id();
+        assertThat(saved.attempts().get(0).status()).isEqualTo(AttemptStatus.PENDING);
+        assertThat(saved.isProcessing(NOW.plusMillis(789))).isFalse();
+        assertThat(carts.persistedEvents()).isEmpty();
+
+        pay(credit(null));
+
+        assertThat(lastGatewayCall().attemptId()).isEqualTo(attemptId);
+        assertThat(stored().status()).isEqualTo(CartStatus.PAID);
+    }
+
+    @Test
+    void anApprovalSavedWhoseAcknowledgementWasLostStillReturnsTheReceipt() {
+        gatewayApproves("AUTH-1");
+        carts.failUpdateAfterStoring(2, new DataAccessResourceFailureException("acknowledgement lost"));
+
+        PaymentReceipt receipt = pay(credit(null));
+
+        assertThat(receipt.lastDigits()).isEqualTo("4242");
+        assertThat(stored().status()).isEqualTo(CartStatus.PAID);
+        assertThat(carts.persistedEvents()).hasSize(1);
+    }
+
+    @Test
+    void aDeclineWhoseSaveLostTheRaceToARequestThatFinishedTheSameAttemptIsPaymentDeclined() {
+        when(gateway.authorize(any())).thenAnswer(invocation -> {
+            PendingPayment pending = invocation.getArgument(0);
+            Cart other = carts.stored(cart.id());
+            other.decline(pending.attemptId(), "declined by the issuer", NOW);
+            carts.update(other).block();
+            return declined("declined by the issuer");
+        });
+
+        assertFailsWith(credit(null), CheckoutError.PAYMENT_DECLINED);
     }
 
     @Test

@@ -33,6 +33,9 @@ teste.
   `bff` (`ErrorCode`), num `switch` exaustivo.
 - Falha técnica de adapter vira `ServiceUnavailableException` (503). Falha ao autorizar pagamento também,
   porque o resultado ficou desconhecido e o retry é seguro.
+- Tentativa com resultado desconhecido nunca é substituída às cegas. Outro meio de pagamento só entra depois
+  de `PaymentGateway.outcomeOf` dizer o que houve com ela, e o domínio recusa abrir uma tentativa nova
+  enquanto existir uma pendente.
 - O objeto de erro tem sempre as mesmas chaves, inclusive as nulas.
 - `checkout.processing-lease` precisa ser maior que `checkout.payment-timeout`; a aplicação não sobe se não
   for.

@@ -6,6 +6,7 @@ package io.github.magnolett.checkoutbff.checkout.domain;
  */
 public enum CheckoutError {
     PRODUCT_NOT_FOUND,
+    PRODUCTS_NOT_COMBINABLE,
     CART_NOT_FOUND,
     CART_EXPIRED,
     CART_ALREADY_PAID,

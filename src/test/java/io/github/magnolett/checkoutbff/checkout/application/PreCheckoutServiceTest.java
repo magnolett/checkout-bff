@@ -60,6 +60,21 @@ class PreCheckoutServiceTest {
     }
 
     @Test
+    void productsInDifferentCurrenciesAreNotCombinableAndNothingIsStored() {
+        Product dollars = new Product("usd", "USD plan", null, Money.of("5.00", "USD"));
+        catalogHas(premium(), dollars);
+        methodsAre(allMethods());
+
+        StepVerifier.create(service.start(List.of("premium", "usd")))
+                .expectErrorSatisfies(error -> assertThat(error).isInstanceOfSatisfying(CheckoutException.class, e -> {
+                    assertThat(e.error()).isEqualTo(CheckoutError.PRODUCTS_NOT_COMBINABLE);
+                    assertThat(e.cartId()).isNull();
+                }))
+                .verify(Duration.ofSeconds(5));
+        verify(cartRepository, never()).insert(any());
+    }
+
+    @Test
     void buildsAnOpenCartWithProductSnapshotAndOfferedMethods() {
         catalogHas(premium());
         methodsAre(allMethods());

@@ -140,5 +140,32 @@ Content-Type: application/json
   }
 }
 
+### Resposta perdida e troca de meio (cenário 10 do README)
+# Antes, suba o BFF com o gateway mais lento que o prazo: PAYMENT_GATEWAY_LATENCY=12s docker compose up -d --wait bff
+POST {{host}}/operations/pre-checkout
+Content-Type: application/json
+
+{"products": [{"slug": "premium"}]}
+
+> {% client.global.set("cartId", response.body.cartId); %}
+
+### Cartão: 503 depois de 10 s, mas o gateway simulado já registrou a cobrança
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{
+  "cartId": "{{cartId}}",
+  "paymentMethod": {
+    "name": "Cartão de Crédito",
+    "card": {"holderName": "Ana Souza", "number": "4242424242424242", "expiry": "12/30", "cvv": "123"}
+  }
+}
+
+### Pix no mesmo carrinho: 409 CART_ALREADY_PAID, a cobrança do cartão é encontrada e o Pix não é cobrado
+POST {{host}}/operations/checkout
+Content-Type: application/json
+
+{"cartId": "{{cartId}}", "paymentMethod": {"name": "Pix"}}
+
 ### Readiness
 GET {{host}}/actuator/health/readiness

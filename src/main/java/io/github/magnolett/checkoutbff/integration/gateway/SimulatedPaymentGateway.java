@@ -25,8 +25,14 @@ import java.util.UUID;
  *   <li>Pix is approved with a simulated end-to-end id.</li>
  * </ul>
  *
- * <p>Like a real provider, it is idempotent by attempt id: the same attempt sent twice gets the first answer. That is
- * what makes resuming a pending attempt safe.
+ * <p>Like a real provider, it is idempotent by attempt id: the same attempt sent twice gets the first answer. The
+ * decision is recorded as soon as the request arrives and the answer comes back after the configured latency, so a
+ * caller that gives up early leaves behind a charge it never heard of, which is the case {@link #outcomeOf} exists
+ * for. Only the authorization is slow: the status query answers at once.
+ *
+ * <p>The record lives in the memory of this instance, bounded to the latest attempts. A real provider keeps it on its
+ * side, shared by every instance of the BFF and kept across restarts; the stand-in does not try to be that, it only
+ * reproduces the behavior that the checkout depends on.
  */
 @Slf4j
 @Component
@@ -57,6 +63,16 @@ class SimulatedPaymentGateway implements PaymentGateway {
                 .doOnNext(authorization -> log.info("simulated authorization attemptId={} method={} outcome={}",
                         payment.attemptId(), payment.methodType(), authorization.getClass().getSimpleName()));
         return latency.isZero() ? answer : answer.delayElement(latency);
+    }
+
+    @Override
+    public Mono<PaymentAuthorization> outcomeOf(UUID attemptId) {
+        return Mono.fromSupplier(() -> {
+            PaymentAuthorization recorded = answers.get(attemptId);
+            log.info("simulated status query attemptId={} outcome={}", attemptId,
+                    recorded == null ? "never received" : recorded.getClass().getSimpleName());
+            return recorded;
+        });
     }
 
     private PaymentAuthorization decide(PendingPayment payment) {

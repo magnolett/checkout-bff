@@ -219,7 +219,9 @@ EOF
 Rodar o comando duas vezes devolve a mesma resposta, com o mesmo `paidAt`. A mesma chave com outro
 cartão responde 422 `IDEMPOTENCY_KEY_REUSED`. A regra para o front é gerar uma chave por intenção de
 pagamento: depois de uma recusa, a nova tentativa leva chave nova; depois de timeout ou 503, repete a
-mesma chave, porque o resultado ficou desconhecido. Sem o header, o comportamento é o do enunciado.
+mesma chave, porque o resultado ficou desconhecido. Sem o header, o comportamento é o do enunciado. Se o
+front gerar chave nova depois de um 503 e mandar o mesmo cartão, a tentativa pendente é retomada e passa a
+responder pelas duas chaves.
 
 ### 8. Falha técnica
 
@@ -246,6 +248,30 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 No Git Bash, prefixe o segundo comando com `MSYS_NO_PATHCONV=1`, senão o caminho `/opt/...` é convertido
 para um caminho do Windows.
 
+### 10. Resposta perdida e troca de meio
+
+O caso mais delicado do pagamento: o provedor cobra, mas a resposta não volta a tempo. Para reproduzir,
+suba o BFF com o gateway mais lento que o prazo de 10 segundos:
+
+```bash
+PAYMENT_GATEWAY_LATENCY=12s docker compose up -d --wait bff
+```
+
+Pague um carrinho novo com o cartão aprovado (cenário 2). Depois de 10 segundos vem um 503
+`SERVICE_UNAVAILABLE`, mas o gateway simulado já tinha registrado a cobrança, como um provedor real que
+decide e responde tarde demais. Agora tente o mesmo carrinho com Pix:
+
+```bash
+curl -s localhost:8080/operations/checkout -H 'Content-Type: application/json' --data-binary @- <<EOF
+{"cartId": "$CART", "paymentMethod": {"name": "Pix"}}
+EOF
+```
+
+A resposta é 409 `CART_ALREADY_PAID`, e o Pix não é cobrado. Antes de aceitar outro meio, o checkout
+pergunta ao provedor o que aconteceu com a tentativa sem resposta, descobre a aprovação e fecha o carrinho
+com ela, com evento e assinatura ativada. Se o provedor tivesse recusado ou nunca recebido a tentativa, o
+Pix seguiria normalmente. Para voltar ao normal, `docker compose up -d --wait bff`.
+
 ## Contrato da API
 
 ### `POST /operations/pre-checkout`
@@ -268,6 +294,7 @@ existe carrinho, e `secondaryButton` vem `null` quando a tela tem uma ação só
 | `errorCode` | HTTP | `displayType` | `code` | Quando |
 |---|---|---|---|---|
 | `PRODUCT_NOT_FOUND` | 422 | BLOCK | C-1001 | slug inexistente no pré-checkout |
+| `PRODUCTS_NOT_COMBINABLE` | 422 | BLOCK | C-1005 | planos com preço em moedas diferentes no mesmo pedido |
 | `CART_NOT_FOUND` | 404 | BLOCK | C-1002 | `cartId` desconhecido |
 | `CART_EXPIRED` | 422 | BLOCK | C-1003 | carrinho com mais de 30 minutos |
 | `CART_ALREADY_PAID` | 409 | BLOCK | C-1004 | carrinho já aprovado |
@@ -343,6 +370,10 @@ sequenceDiagram
     participant K as Kafka
     FE->>UC: POST /operations/checkout
     UC->>DB: carrega o carrinho
+    opt tentativa anterior sem resposta e outro meio de pagamento
+        UC->>GW: consulta o status da tentativa pendente
+        UC->>DB: grava o desfecho: aprovada, recusada ou nunca recebida
+    end
     UC->>UC: valida, abre ou retoma a tentativa
     UC->>DB: PROCESSING com lease de 30 s (update condicional por versão)
     UC->>GW: autoriza com o attemptId como chave de idempotência, prazo de 10 s
@@ -361,6 +392,7 @@ stateDiagram-v2
     DECLINED --> PROCESSING: nova tentativa
     PROCESSING --> PAID: aprovado
     PROCESSING --> DECLINED: recusado
+    PROCESSING --> OPEN: provedor nunca recebeu a tentativa
     PAID --> [*]
 ```
 
@@ -370,6 +402,17 @@ meio da cobrança. Se o gateway falha ou não responde em 10 segundos, o lease �
 pendente e o cliente recebe 503. Um novo pedido com o mesmo cartão retoma a mesma tentativa, com o mesmo
 `attemptId`, que é a chave de idempotência do provedor. Assim o retry nunca vira uma segunda cobrança
 ([ADR 0005](docs/adr/0005-idempotencia-do-pagamento.md)).
+
+Com outro meio de pagamento não há o que retomar, e abandonar a tentativa pendente às cegas deixaria para
+trás uma cobrança que pode ter acontecido. Por isso o checkout consulta antes o status dela no provedor.
+Aprovada, o carrinho fecha com ela e o novo meio não é tocado. Recusada ou nunca recebida, ela é encerrada
+e o novo meio segue. Sem resposta do provedor, 503 e nada muda. O domínio reforça a regra: ele se recusa a
+abrir uma tentativa nova enquanto existir uma pendente sem desfecho.
+
+Se o provedor responde e a gravação do desfecho falha, o carrinho relido decide a resposta: o desfecho
+pode ter sido gravado com a confirmação perdida, ou outra requisição pode ter terminado a mesma tentativa
+(recibo); outra requisição pode estar com ela agora (409); ou o banco falhou, e então o lease é liberado
+para que o "Tentar novamente" retome a tentativa na hora (503).
 
 O evento de pagamento é gravado no próprio documento do carrinho, no mesmo update que muda o estado, e um
 relay agendado o publica no Kafka. Gravar o estado e publicar o evento nunca diverge, e não é preciso
@@ -415,17 +458,17 @@ pagamento e o BFF recebe só o token, fora do escopo PCI.
 ```
 
 Roda os testes de unidade (Surefire) e os de integração (Failsafe, classes `*IT`) contra MongoDB, Redis e
-Kafka reais em Testcontainers, então precisa do Docker. São 304 testes, e a cobertura medida pelo JaCoCo
-nas duas fases é de 98% das instruções e 87% dos ramos (relatório em `target/site/jacoco/index.html`).
+Kafka reais em Testcontainers, então precisa do Docker. São 335 testes, e a cobertura medida pelo JaCoCo
+nas duas fases é de 98% das instruções e 88% dos ramos (relatório em `target/site/jacoco/index.html`).
 
 | Camada | Como é testada | Testes |
 |---|---|---|
-| Domínio | JUnit puro, sem Spring: estados, retomada, validação do cartão, dinheiro | 81 |
-| Casos de uso | repositório em memória com lock otimista de verdade; tempo virtual do Reactor para provar o paralelismo | 56 |
-| Web e contrato de erro | `@WebFluxTest`: cada erro no formato exato, status, log sem dado de cartão | 112 |
-| Adapters | WireMock para retry, timeout, 404, payload inválido e circuit breaker; cache que falha aberto; gateway simulado | 26 |
+| Domínio | JUnit puro, sem Spring: estados, retomada, desfecho de resposta perdida, validação do cartão, dinheiro | 92 |
+| Casos de uso | repositório em memória com lock otimista de verdade, que também simula banco fora e confirmação perdida; tempo virtual do Reactor para timeout e paralelismo | 68 |
+| Web e contrato de erro | `@WebFluxTest`: cada erro no formato exato, status, log sem dado de cartão | 116 |
+| Adapters | WireMock para retry, timeout, 404, payload inválido e circuit breaker; cache que falha aberto; gateway simulado e consulta de status | 29 |
 | Arquitetura | ArchUnit com as fronteiras entre pacotes | 8 |
-| Integração | fluxo HTTP completo, duplo clique, idempotência, outbox até o Kafka, consumidor, DLT, ausência do número no banco | 21 |
+| Integração | fluxo HTTP completo, duplo clique, idempotência, resposta perdida seguida de troca de meio, outbox até o Kafka, consumidor, DLT, ausência do número no banco | 22 |
 
 O CI no GitHub Actions roda o mesmo `./mvnw verify` e depois constrói a imagem Docker.
 
@@ -442,8 +485,13 @@ O CI no GitHub Actions roda o mesmo `./mvnw verify` e depois constrói a imagem 
 - Tokenização do cartão no front e 3DS no débito.
 - Pix assíncrono de verdade: cobrança com QR Code dinâmico e confirmação por webhook do provedor. Aqui o
   Pix é aprovado na hora, como o enunciado pede.
-- Conciliação com o provedor para a tentativa que ficou pendente e que o usuário nunca repetiu: um job
-  consultaria o status pelo `attemptId` antes de considerar a tentativa abandonada.
+- Conciliação ativa com o provedor. Hoje o status é consultado quando o cliente volta com outro meio. A
+  tentativa que ficou pendente e que o usuário nunca repetiu espera um job que consulte o provedor pelo
+  `attemptId`. Há também uma corrida que a consulta não fecha: a requisição original ainda a caminho do
+  provedor quando ele responde que nunca a recebeu. Isso se resolve na conciliação com o relatório de
+  liquidação, com estorno automático da cobrança tardia.
+- O gateway simulado guarda as decisões na memória de uma instância. Um provedor real guarda do lado dele,
+  e por isso a retomada vale para qualquer instância do BFF.
 - Rastreamento distribuído com OpenTelemetry.
 - Textos de erro vindos de um CMS, com tradução.
 
@@ -460,9 +508,19 @@ fim do desafio.
    pelo [`AGENTS.md`](AGENTS.md) deste repositório.
 3. Frentes independentes rodaram em paralelo, cada uma com um agente: os testes de unidade e de web, numa
    cópia isolada do código, e o empacotamento (Dockerfile, compose, CI e um smoke test da stack inteira).
-4. A verificação foi feita de verdade: a suíte completa com Testcontainers, cada cenário deste README
-   executado na stack real e uma revisão do código por um agente independente.
+4. A verificação foi feita de verdade: a suíte completa com Testcontainers e cada cenário deste README
+   executado na stack real.
+5. Com a primeira versão pronta, pedi uma revisão do código a um agente independente, que não tinha
+   participado da escrita. Cada achado foi conferido contra o código antes de virar correção, e os que
+   não procediam ficaram registrados com o motivo.
 
 Os testes pegaram bugs reais no caminho. O horário do carrinho saía sem truncar. Um erro genérico do
 gateway virava 500 em vez de 503. E a DLT recebia o nome antigo depois do Spring Kafka 4, que trocou o
-sufixo padrão de `.DLT` para `-dlt`. Os commits feitos com o agente levam o trailer `Co-Authored-By`.
+sufixo padrão de `.DLT` para `-dlt`.
+
+A revisão independente achou o que os testes não pegavam, porque eles cobriam o que eu tinha pensado. O
+mais sério estava no caminho do dinheiro: depois de um timeout, trocar de cartão abandonava a tentativa
+pendente sem perguntar ao provedor se ela tinha cobrado. Hoje o checkout consulta o status antes (cenário
+10). Ela achou também a gravação do desfecho que, ao falhar, virava 500 ou prendia o carrinho por 30
+segundos, a chave de idempotência nova que não ficava registrada na retomada e o pedido com planos em
+moedas diferentes, que dava 500. Os commits feitos com o agente levam o trailer `Co-Authored-By`.

@@ -20,6 +20,7 @@ class InMemoryCartRepository implements CartRepository {
 
     private final Map<UUID, Cart> store = new HashMap<>();
     private final Map<Integer, RuntimeException> updateFailures = new HashMap<>();
+    private final Map<Integer, RuntimeException> failuresAfterStoring = new HashMap<>();
     private final List<Cart> updates = new ArrayList<>();
     private final List<CheckoutEvent> persistedEvents = new ArrayList<>();
     private int updateCalls;
@@ -31,6 +32,11 @@ class InMemoryCartRepository implements CartRepository {
     /** Makes the nth call to update (1-based) fail with the given error, before anything is stored. */
     void failUpdate(int nthCall, RuntimeException error) {
         updateFailures.put(nthCall, error);
+    }
+
+    /** Makes the nth call to update store the cart and fail anyway, like a write whose acknowledgement is lost. */
+    void failUpdateAfterStoring(int nthCall, RuntimeException error) {
+        failuresAfterStoring.put(nthCall, error);
     }
 
     int updateCalls() {
@@ -81,7 +87,8 @@ class InMemoryCartRepository implements CartRepository {
             Cart snapshot = copy(cart);
             store.put(cart.id(), snapshot);
             updates.add(copy(cart));
-            return Mono.just(cart);
+            RuntimeException lostAcknowledgement = failuresAfterStoring.get(updateCalls);
+            return lostAcknowledgement == null ? Mono.just(cart) : Mono.error(lostAcknowledgement);
         });
     }
 

@@ -79,14 +79,15 @@ class CartDocumentMapper {
     }
 
     private static AttemptDocument toDocument(PaymentAttempt attempt) {
-        return new AttemptDocument(attempt.id().toString(), attempt.idempotencyKey(), attempt.fingerprint(),
+        return new AttemptDocument(attempt.id().toString(), attempt.idempotencyKeys(), attempt.fingerprint(),
                 attempt.methodType(), attempt.methodName(), attempt.lastDigits(), attempt.amount().amount(),
                 attempt.amount().currency(), attempt.status(), attempt.transactionId(), attempt.declineReason(),
                 attempt.startedAt(), attempt.completedAt());
     }
 
     private static PaymentAttempt toAttempt(AttemptDocument document) {
-        return new PaymentAttempt(UUID.fromString(document.id()), document.idempotencyKey(), document.fingerprint(),
+        List<String> keys = document.idempotencyKeys() == null ? List.of() : document.idempotencyKeys();
+        return new PaymentAttempt(UUID.fromString(document.id()), keys, document.fingerprint(),
                 document.methodType(), document.methodName(), document.lastDigits(),
                 new Money(document.amount(), document.currency()), document.status(), document.transactionId(),
                 document.declineReason(), document.startedAt(), document.completedAt());

@@ -35,7 +35,10 @@ derivado do `attemptId`.
 
 - Dois cartões diferentes com os mesmos últimos dígitos e a mesma validade seriam tratados como o mesmo na
   retomada. O efeito é reaproveitar o `attemptId` pendente, e o provedor responderia pela tentativa
-  original. Não há cobrança dupla, e o caso é raro: risco aceito.
+  original. Não há cobrança dupla, e o caso é raro: risco aceito. Um provedor real que compara o payload de
+  cada chave de idempotência recusaria essa retomada como conflito. O adaptador dele trataria o conflito
+  como troca de meio: consulta o status da tentativa e segue o que o [ADR 0005](0005-idempotencia-do-pagamento.md)
+  decide para esse caso.
 - Num checkout real o número nem chegaria ao BFF: o front tokeniza o cartão direto no provedor, e o BFF
   recebe só o token.
 - Há teste para isso: o teste de integração procura o número completo no documento cru do MongoDB, e os

@@ -22,6 +22,11 @@ public enum ErrorCode {
             "O plano escolhido não está disponível. Escolha outro plano para continuar.",
             button("Ver planos", "/planos"), null),
 
+    PRODUCTS_NOT_COMBINABLE(HttpStatus.UNPROCESSABLE_CONTENT, DisplayType.BLOCK, "C-1005",
+            "Planos não podem ser combinados",
+            "Os planos escolhidos não podem ser assinados no mesmo pedido. Escolha um deles para continuar.",
+            button("Ver planos", "/planos"), null),
+
     CART_NOT_FOUND(HttpStatus.NOT_FOUND, DisplayType.BLOCK, "C-1002",
             "Não encontramos seu pedido",
             "Este carrinho não existe ou já foi encerrado. Escolha seu plano novamente.",
@@ -100,6 +105,7 @@ public enum ErrorCode {
     public static ErrorCode of(CheckoutError error) {
         return switch (error) {
             case PRODUCT_NOT_FOUND -> PRODUCT_NOT_FOUND;
+            case PRODUCTS_NOT_COMBINABLE -> PRODUCTS_NOT_COMBINABLE;
             case CART_NOT_FOUND -> CART_NOT_FOUND;
             case CART_EXPIRED -> CART_EXPIRED;
             case CART_ALREADY_PAID -> CART_ALREADY_PAID;

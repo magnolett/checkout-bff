@@ -26,6 +26,10 @@ import java.util.UUID;
  * Concurrency is handled outside, by optimistic locking on {@link #version()}: two requests that read the same
  * version cannot both persist the move to PROCESSING. The processing lease keeps a crashed instance from locking
  * the cart forever.
+ *
+ * <p>When the gateway answer is lost, the attempt stays pending with its outcome unknown. The same instrument resumes
+ * it. A different one is accepted only after the provider says what became of it ({@link #settle}), so a charge that
+ * went through is never followed by a second one.
  */
 public final class Cart {
 
@@ -58,7 +62,10 @@ public final class Cart {
         this.version = version;
     }
 
-    /** New cart from the pre-checkout. The total is the sum of the snapshot prices. */
+    /**
+     * New cart from the pre-checkout. The total is the sum of the snapshot prices, so every product must be priced in
+     * the same currency: plans in different currencies cannot share an order.
+     */
     public static Cart create(UUID id, List<Product> items, List<PaymentMethod> paymentMethods, Instant now,
                               Duration ttl) {
         if (items.isEmpty()) {
@@ -66,6 +73,11 @@ public final class Cart {
         }
         if (paymentMethods.isEmpty()) {
             throw new IllegalArgumentException("a cart needs at least one payment method");
+        }
+        String currency = items.getFirst().price().currency();
+        if (items.stream().anyMatch(item -> !item.price().currency().equals(currency))) {
+            throw new CheckoutException(CheckoutError.PRODUCTS_NOT_COMBINABLE, null,
+                    "products priced in different currencies");
         }
         Money total = items.stream().map(Product::price).reduce(Money::plus).orElseThrow();
         return new Cart(id, items, paymentMethods, total, now, now.plus(ttl), CartStatus.OPEN, null, List.of(), null,
@@ -86,7 +98,8 @@ public final class Cart {
      * <p>Resuming covers the lost answer: the gateway call timed out, or its outcome could not be saved, and nobody
      * knows whether the customer was charged. If the same instrument comes back (same method, last digits and
      * expiry), the attempt keeps its id. That id is the idempotency key sent to the gateway, so a charge that went
-     * through is returned instead of repeated. A different instrument abandons the pending attempt.
+     * through is returned instead of repeated. A different instrument needs the pending attempt settled first
+     * ({@link #attemptToSettleBefore}).
      *
      * <p>The other checks follow the order in which the customer can fix them: a paid or expired cart cannot be fixed
      * on the payment screen, a wrong method or card can. Expiry blocks a new charge, never the end of one that
@@ -108,10 +121,46 @@ public final class Cart {
                 .orElseThrow(() -> failure(CheckoutError.PAYMENT_METHOD_NOT_ALLOWED, "method not offered in this cart"));
         validateInstrument(method.type(), order.card(), now);
 
-        PaymentAttempt attempt = resumable.orElseGet(() -> openAttempt(order, method, now));
+        PaymentAttempt attempt = resumable
+                .map(pending -> resume(pending, order.idempotencyKey()))
+                .orElseGet(() -> openAttempt(order, method, now));
         status = CartStatus.PROCESSING;
         processingLeaseUntil = now.plus(processingLease);
         return new PendingPayment(id, attempt.id(), method.type(), total, order.card());
+    }
+
+    /**
+     * The pending attempt that must be settled before this order can be charged, if any.
+     *
+     * <p>A pending attempt outside its lease is one whose answer was lost. Coming back with the same instrument
+     * resumes it, and the gateway answers for the original charge. Coming back with a different one would leave that
+     * charge behind, so the provider has to say first what became of it. Empty when the cart is paid or busy, which
+     * {@link #startPayment} refuses with the proper error.
+     */
+    public Optional<PaymentAttempt> attemptToSettleBefore(PaymentOrder order, Instant now) {
+        if (status == CartStatus.PAID || isProcessing(now)) {
+            return Optional.empty();
+        }
+        return pendingAttempt().filter(pending -> !pending.fingerprint().equals(order.fingerprint()));
+    }
+
+    /**
+     * Records what the provider says about a pending attempt whose answer was lost. Approved: the cart is paid by it,
+     * exactly as if the answer had arrived in time, so no other instrument gets charged. Declined: recorded as
+     * declined. Unknown to the provider: abandoned, because the request never reached it.
+     */
+    public void settle(UUID attemptId, Optional<PaymentAuthorization> outcome, Instant now) {
+        if (isProcessing(now)) {
+            throw new IllegalStateException("cart " + id + " is still processing attempt " + attemptId);
+        }
+        if (outcome.isEmpty()) {
+            abandon(attemptId, now);
+            return;
+        }
+        switch (outcome.get()) {
+            case PaymentAuthorization.Approved approved -> approve(attemptId, approved.transactionId(), now);
+            case PaymentAuthorization.Declined declined -> decline(attemptId, declined.reason(), now);
+        }
     }
 
     public void approve(UUID attemptId, String transactionId, Instant now) {
@@ -146,17 +195,21 @@ public final class Cart {
         return status == CartStatus.PROCESSING && processingLeaseUntil != null && processingLeaseUntil.isAfter(now);
     }
 
-    /** Latest attempt made with the given idempotency key. */
+    /** Latest attempt reached by a request with the given idempotency key. */
     public Optional<PaymentAttempt> attemptByIdempotencyKey(String idempotencyKey) {
         if (idempotencyKey == null) {
             return Optional.empty();
         }
         for (int i = attempts.size() - 1; i >= 0; i--) {
-            if (idempotencyKey.equals(attempts.get(i).idempotencyKey())) {
+            if (attempts.get(i).answersTo(idempotencyKey)) {
                 return Optional.of(attempts.get(i));
             }
         }
         return Optional.empty();
+    }
+
+    public Optional<PaymentAttempt> attempt(UUID attemptId) {
+        return attempts.stream().filter(a -> a.id().equals(attemptId)).findFirst();
     }
 
     public Optional<PaymentAttempt> approvedAttempt() {
@@ -178,11 +231,27 @@ public final class Cart {
         this.newEvents.clear();
     }
 
+    private PaymentAttempt resume(PaymentAttempt pending, String idempotencyKey) {
+        PaymentAttempt resumed = pending.resumedWith(idempotencyKey);
+        replace(pending, resumed);
+        return resumed;
+    }
+
     private PaymentAttempt openAttempt(PaymentOrder order, PaymentMethod method, Instant now) {
-        pendingAttempt().ifPresent(stale -> replace(stale, stale.abandoned(now)));
+        pendingAttempt().ifPresent(unsettled -> {
+            throw new IllegalStateException("attempt " + unsettled.id() + " of cart " + id
+                    + " has an unknown outcome: settle it with the provider before opening another one");
+        });
         PaymentAttempt attempt = PaymentAttempt.start(UUID.randomUUID(), order, method, total, now);
         attempts.add(attempt);
         return attempt;
+    }
+
+    private void abandon(UUID attemptId, Instant now) {
+        PaymentAttempt attempt = pendingAttempt(attemptId);
+        replace(attempt, attempt.abandoned(now));
+        status = CartStatus.OPEN;
+        processingLeaseUntil = null;
     }
 
     private Optional<PaymentMethod> offeredMethod(String methodName) {
@@ -204,7 +273,7 @@ public final class Cart {
         }
     }
 
-    /** At most one attempt is pending at a time: opening a new one abandons the stale one. */
+    /** At most one attempt is pending at a time: a new one opens only after the pending one is settled. */
     private Optional<PaymentAttempt> pendingAttempt() {
         return attempts.stream().filter(a -> a.status() == AttemptStatus.PENDING).findFirst();
     }
