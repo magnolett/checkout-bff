@@ -39,8 +39,8 @@ O comando só retorna quando a API responde à sonda de readiness. Sobem seis co
 | `redis` | localhost:6379 | cache dos catálogos |
 | `kafka` | localhost:9092 | eventos de pagamento |
 
-A documentação interativa fica em http://localhost:8080/swagger-ui.html, com o exemplo de sucesso e de
-cada erro. Para desligar e apagar os dados, `docker compose down -v`.
+A documentação interativa fica em http://localhost:8080/swagger-ui.html, com o exemplo de sucesso e dos
+erros principais. Para desligar e apagar os dados, `docker compose down -v`.
 
 Para rodar a aplicação pela IDE, suba só a infraestrutura. A configuração padrão já aponta para
 `localhost`:

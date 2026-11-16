@@ -15,7 +15,8 @@ emissor, pelo gateway. Com Luhn, quem testasse com o exemplo do enunciado recebe
 
 **A validação mora no domínio.** Exigir ou proibir cartão depende do meio escolhido (crédito e débito
 exigem, Pix proíbe), então quem valida é o carrinho e não o Bean Validation. O erro sai como
-`INVALID_PAYMENT_DATA`, com o nome do campo e sem o valor rejeitado.
+`INVALID_PAYMENT_DATA`; o nome do campo vai para o log, nunca o valor, e a resposta mantém o objeto de
+erro padrão.
 
 **Nada sensível sai da requisição.** O número completo e o CVV não são persistidos, logados nem
 publicados. O carrinho guarda os últimos quatro dígitos e uma impressão digital, o SHA-256 do meio, dos

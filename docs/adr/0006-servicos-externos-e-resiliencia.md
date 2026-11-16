@@ -23,7 +23,7 @@ retry fica por fora para que cada tentativa passe pelo circuit breaker e conte n
 - 4xx não repete nem conta como falha do serviço, porque o problema está no pedido.
 - 404 de produto é resposta e não falha: vira `PRODUCT_NOT_FOUND`.
 - Qualquer outra falha, inclusive payload inválido, vira `ServiceUnavailableException` e responde 503.
-- Meio de pagamento desconhecido ou desabilitado é filtrado e logado, sem derrubar a lista.
+- Meio desabilitado é filtrado, e meio com código desconhecido é filtrado e logado, sem derrubar a lista.
 
 Os operadores do Resilience4j entram explícitos na cadeia reativa, o que deixa a ordem visível no código e
 testável.

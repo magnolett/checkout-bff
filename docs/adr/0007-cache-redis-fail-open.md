@@ -16,12 +16,14 @@ Cache-aside explícito, em decorators das portas (`CachingProductCatalog` e `Cac
 - TTL de 10 minutos para produto e de 5 minutos para os meios, configuráveis.
 - Só acerto entra no cache. Produto inexistente e lista vazia de meios não entram, para que um erro
   momentâneo do serviço não fique gravado como resposta.
-- Falha aberta: qualquer problema com o Redis (fora do ar, mais lento que 500 ms, valor que não
-  desserializa) vira cache miss, e a consulta segue para o serviço. Escrita que falha é ignorada.
+- Falha aberta: qualquer problema com o Redis (fora do ar, sem resposta no timeout de comando do Lettuce,
+  de 250 ms, valor que não desserializa) vira cache miss, e a consulta segue para o serviço. Escrita que
+  falha é ignorada.
 - A readiness não inclui o Redis.
 
-O cache é otimização e não pode virar ponto único de falha do checkout. E preço defasado no cache não chega
-à cobrança, porque o checkout cobra o snapshot gravado no carrinho.
+O cache é otimização e não pode virar ponto único de falha do checkout. O checkout cobra o snapshot gravado
+no carrinho, então o cliente paga o preço que viu; como o snapshot nasce do catálogo, esse preço pode ter até
+10 minutos de defasagem.
 
 ## Alternativas consideradas
 
